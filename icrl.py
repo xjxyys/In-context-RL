@@ -3,6 +3,10 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import matplotlib.pyplot as plt
+import torch
+from torch.utils.data import Dataset, DataLoader
+from transformers import GPT2Tokenizer, GPT2LMHeadModel, AdamW
+
 ####################
 # Environment Class
 ####################
@@ -25,98 +29,151 @@ class Environment:
         action = self.action_set[action_index]
         reward = np.dot(action, self.w_star) + np.random.normal(0, self.std_variance)
         return reward, action
-
+    
+    def reset(self):
+        # reset w_star and action_set
+        self.w_star = np.random.uniform(0, 1, self.context_dim)
+        self.action_set = np.random.uniform(-1, 1, (self.num_actions, self.context_dim))
+        
 ####################
 # LinUCB Class
 ####################
+
 class LinUCB:
-    def __init__(self, num_actions, context_dim, alpha=1.0, lambda_reg=1.0):
-        self.alpha = alpha
+    def __init__(self, num_actions, context_dim, alpha=2, lambda_reg=1):
+        self.alpha = alpha  # Set alpha to the fixed value of 2
         self.lambda_reg = lambda_reg
-        self.A = np.array([np.eye(context_dim) * lambda_reg for _ in range(num_actions)])
-        self.b = np.zeros((context_dim, num_actions))
         self.context_dim = context_dim
         self.num_actions = num_actions
+        self.A = np.eye(context_dim) * lambda_reg  # Initialize A as a diagonal matrix with lambda_reg on the diagonal: X.T @ X + lambda_reg * I
+        self.b = np.zeros((context_dim, 1)) # Initialize b as a zero vector, b represents the sum of rewards for each action: X.T @ y
+        # self.historical_rewards = np.zeros(1)  # Initialize the historical rewards vector
+        self.t = 0  # Time step counter
 
-    def select_action(self, actions):
+    def estimate_w_ridge(self):
+        """
+        Estimates the ridge regression parameter w_ridge for action k
+        with normalization by 2t.
+        """
+        A_inv = np.linalg.inv(self.A) # (X.T @ X + lambda_reg * I)^-1
+        return A_inv @ self.b # A_inv @ X.T @ y
+
+
+    def select_action(self, action_set):
         p = np.zeros(self.num_actions)
-        for a in range(self.num_actions):
-            A_inv = np.linalg.inv(self.A[a])
-            theta_a = A_inv @ self.b[:, a]
-            p[a] = theta_a.T @ actions[a] + self.alpha * np.sqrt(actions[a].T @ A_inv @ actions[a])
+        w_ridge = self.estimate_w_ridge().flatten()
+        A_inv = np.linalg.inv(self.A)
+        # print('A_inv', A_inv.shape)
+        # print('w_ridge', w_ridge.shape)
+        
+        for k in range(self.num_actions):
+            chosen_action = action_set[k]
+            # print('chosen_action', chosen_action.shape)
+            p[k] = (chosen_action.T @ w_ridge +
+                    self.alpha * np.sqrt(chosen_action.T @ A_inv @ chosen_action))
+        # Select the action with the highest UCB
         return np.argmax(p)
 
-    # def update(self, action_index, reward, action):
-    #     self.A[action_index] += np.outer(action, action)
-    #     self.b[:, action_index] += reward * action.reshape(-1)  # Ensures 'action' is one-dimensional
-    def update(self, action_index, reward, action):
-        # Ensure 'action' is a one-dimensional array
-        action = np.array(action).flatten()
-        # Update A matrix for the chosen action
-        self.A[action_index] += np.outer(action, action)
-        # Update b vector for the chosen action
-        # print(self.b[:, action_index].shape)
-        # print(reward * action.shape)
-        self.b[:, action_index] += reward * action
-    
+    def update(self, reward, action):
+        self.t += 1  # Increment the time step
+        # Update A and b matrices with the chosen action and received reward
+        self.A += np.outer(action, action)
+        self.b += reward * action.reshape(-1, 1)  # Ensure 'action' is a one-dimensional array
+
+    def reset(self):
+        # Reset the A and b matrices, and the time step counter
+        self.A = np.eye(self.context_dim) * self.lambda_reg  # Initialize A as a diagonal matrix with lambda_reg on the diagonal: X.T @ X + lambda_reg * I
+        self.b = np.zeros((self.context_dim, 1)) # Initialize b as a zero vector, b represents the sum of rewards for each action: X.T @ y
+        self.t = 0
+
 ####################
-# Usefull Functions
+# Dataset
 ####################
-# Function to run a single trajectory and compute regret
-def run_trajectory_with_regret(env, linucb, rounds=200):
-    total_regret = 0
-    regrets = []
-    best_action_index = env.get_best_action_index()  # Best action doesn't change in this setup
-    best_action_reward = np.dot(env.action_set[best_action_index], env.w_star)
-    
-    for _ in range(rounds):
-        action_index = linucb.select_action(env.action_set)
-        reward = env.step(action_index)
-        linucb.update(action_index, reward, env.action_set[action_index])
+
+class TrajectoryDataset(Dataset):
+    def __init__(self, trajectories):
+        # trajectories的结构应该是一个列表，其中包含形如([s1, s2, ..., sT], [a1, a2, ..., aT], [r1, r2, ..., rT])的元组
+        self.trajectories = trajectories
+
+    def __len__(self):
+        return sum(len(traj[0]) - 1 for traj in self.trajectories)  # 每个轨迹减去初始状态
+
+    def __getitem__(self, idx):
+        # 根据idx找到对应的轨迹和时间步
+        for trajectory in self.trajectories:
+            states, actions, rewards = trajectory
+            if idx < len(states) - 1:
+                break
+            idx -= len(states) - 1
         
-        # Calculate regret for this round and add to total
-        round_regret = best_action_reward - reward
-        total_regret += round_regret
-        regrets.append(total_regret)
-    
-    return regrets
+        # 构建输入，前面所有的状态和动作和奖励
+        state_action = torch.cat((states[idx].flatten(), actions[idx].reshape(-1)), dim=0)
+        # 下一个动作作为目标
+        next_action = actions[idx + 1].reshape(-1)
 
-# Function to average the regrets over multiple trajectories
-def average_regrets(num_trajectories, rounds=200):
-    all_regrets = np.zeros((num_trajectories, rounds))
-    for i in range(num_trajectories):
-        env = Environment(num_actions=10, context_dim=5)
-        linucb = LinUCB(num_actions=10, context_dim=5)
-        regrets = run_trajectory_with_regret(env, linucb, rounds)
-        all_regrets[i] = regrets
-    # Average over all trajectories
-    return np.mean(all_regrets, axis=0)
+        # 目标是预测下一个动作的概率分布
+        return state_action, next_action
 
+class TrajectoryDataset(Dataset):
+    def __init__(self, trajectories, history_len=200):
+        self.sequences = []
+        for trajectory in trajectories:
+            # 创建历史序列，最大长度为history_len
+            history = []
+            for t in range(1, len(trajectory)):
+                state, action, reward = trajectory[t-1]
+                # 将状态、动作和奖励添加到历史中
+                history.extend(state.flatten().tolist())
+                history.extend(action.flatten().tolist())
+                history.append(reward)  # 奖励是个标量，直接添加
+                
+                # 当前状态和历史一起形成模型的输入
+                model_input = history + trajectory[t][0].flatten().tolist()
 
+                # 下一个动作是目标
+                model_target = trajectory[t][1].flatten().tolist()
+
+                self.sequences.append((model_input, model_target))
+
+    def __len__(self):
+        return len(self.sequences)
+
+    def __getitem__(self, idx):
+        input_sequence, target_action = self.sequences[idx]
+        return torch.tensor(input_sequence, dtype=torch.float), torch.tensor(target_action, dtype=torch.float)
 
 
 ####################
 # Thompson Sampling Class
 ####################
 class ThompsonSampling:
-    def __init__(self, env, lambda_reg):
-        self.env = env
-        self.lambda_reg = lambda_reg
-        self.A = np.array([np.eye(env.context_dim) * lambda_reg for _ in range(env.num_actions)])
-        self.b = np.zeros((env.context_dim, env.num_actions))
+    def __init__(self, num_actions, context_dim, std_dev=1.5, lambda_param=1):
+        self.num_actions = num_actions
+        self.context_dim = context_dim
+        self.std_dev = std_dev
+        self.lambda_param = lambda_param
+        self.A = np.eye(context_dim) * lambda_param
+        self.b = np.zeros((context_dim, 1))
 
-    def select_action(self, context):
-        # Sample theta from the posterior distribution
-        theta_samples = np.array([np.random.multivariate_normal(np.linalg.inv(self.A[a]) @ self.b[:, a], np.linalg.inv(self.A[a])) for a in range(self.env.num_actions)])
-        # Select action based on the sampled theta
-        p = np.array([theta.T @ context for theta in theta_samples])
-        return np.argmax(p)
+    def select_action(self, action_set):
+        A_inv = np.linalg.inv(self.A)
+        mu_t = A_inv @ self.b
+        Sigma_t = self.lambda_param * self.std_dev * A_inv
+        sampled_theta = np.random.multivariate_normal(mu_t.flatten(), Sigma_t)
+        
+        # Compute the value for each action
+        values = action_set @ sampled_theta
+        return np.argmax(values)
 
-    def update(self, context, action, reward):
-        # Update the estimates of A and b based on the observed reward
-        self.A[action] += np.outer(context, context)
-        self.b[:, action] += reward * context
+    def update(self, reward, action):
+        # Update A and b matrices with the chosen action and received reward
+        self.A += np.outer(action, action)
+        self.b += (reward * action).reshape(-1, 1)
 
+    def reset(self):
+        # Reset the A and b matrices
+        self.A = np.eye(self.context_dim) * self.lambda_param
+        self.b = np.zeros((self.context_dim, 1))
 ####################
 # Transformer Model Class
 ####################
