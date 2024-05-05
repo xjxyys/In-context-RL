@@ -79,10 +79,9 @@ class SequenceTrainer:
                 self.diagnostics['training_action_error'] = torch.mean((action_preds-action_target)**2).detach().cpu().item()
 
             return loss.detach().cpu().item()
-
+        
 class TrajectoryDataset:
     def __init__(self, traj_data, time_step=200, num_actions=10, context_dim=5):
-        
         self.traj_data = traj_data
         self.time_step = time_step
         self.num_actions = num_actions
@@ -91,32 +90,36 @@ class TrajectoryDataset:
     def __len__(self):
         return len(self.traj_data)
     
+    def embed_odd(self, state, t):
+        h1a = np.zeros(self.context_dim+1)  # h^a_{2t-1}
+        h1b = state[t].reshape(self.num_actions*self.context_dim)  # h^b_{2t-1}
+        h1c = np.zeros(self.num_actions)  # h^c_{2t-1}
+        h1d = np.zeros(1)
+        pos_1 = np.array([2*t-1, (2*t-1)**2, 1])
+        h1 = np.concatenate([h1a, h1b, h1c, h1d, pos_1])
+        return h1
+
+    def embed_even(self, action, reward, t):
+        h2a = action[t]
+        h2a = np.concatenate([h2a, np.array([reward[t]])])  # Add reward to the action embedding
+        h2b = np.zeros(self.num_actions*self.context_dim)
+        h2c = np.zeros(self.num_actions)
+        h2d = np.zeros(1)
+        pos_2 = np.array([2*t, (2*t)**2, 1])
+        h2 = np.concatenate([h2a, h2b, h2c, h2d, pos_2])
+        return h2
+
     def tokenize(self, traj):
-        states, actions, rewards, = traj
+        states, actions, rewards = traj
         tokens = []
-        for t in self.time_step:
-            h1a = np.zeros(self.context_dim+1) # h^a_{2t-1}
-            h1b = states[t].reshape(self.num_actions*self.context_dim) # h^b_{2t-1}
-            h1c = np.zeros(self.num_actions) # h^c_{2t-1}
-            h1d = np.zeros(1)
-            pos_1 = np.array([2*t-1, (2*t-1)^2, 1])
-            h1 = np.concatenate([h1a, h1b, h1c, h1d, pos_1])
-
-            h2a = actions[t]
-            h2a = np.concatenate([h2a, np.array([rewards[t]])])
-            h2b = np.zeros(self.num_actions*self.context_dim)
-            h2c = np.zeros(self.num_actions)
-            h2d = np.zeros(1)
-            pos_2 = np.array([2*t, (2*t)^2, 1])
-            h2 = np.concatenate([h2a, h2b, h2c, h2d, pos_2])
-
+        for t in range(self.time_step):  # fixed range issue here
+            h1 = self.embed_odd(states, t)
+            h2 = self.embed_even(actions, rewards, t)
             tokens.extend([h1, h2])
         # to torch tensor
         tokens = torch.tensor(tokens, dtype=torch.float32)
-
         return tokens
     
     def __getitem__(self, idx):
         return self.tokenize(self.traj_data[idx])
-
 
