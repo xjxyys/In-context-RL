@@ -4,9 +4,12 @@ import torch.nn as nn
 import torch.optim as optim
 import matplotlib.pyplot as plt
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from transformers import GPT2Tokenizer, GPT2LMHeadModel, AdamW
 
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 ####################
 # Environment Class
 ####################
@@ -121,52 +124,96 @@ class ThompsonSampling:
 ####################
 # Dataset
 ####################
-
-class TrajectoryDataset:
-    def __init__(self, traj_data, time_step=200, num_actions=10, context_dim=5):
+class TrajectoryDataset(Dataset):
+    def __init__(self, traj_data, act_num=10):
+        # self.shuffle = shuffle
         self.traj_data = traj_data
-        self.time_step = time_step
-        self.num_actions = num_actions
-        self.context_dim = context_dim
+        self.act_num = act_num
+        # self.dataset ={
+        #     "action_set": states,
+        #     "context_actions": actions,
+        #     "context_rewards": rewards,
+        #     "optimal_actions": action_indexs
+        # }
 
     def __len__(self):
+        # return len(self.dataset['action_set'])
         return len(self.traj_data)
     
-    def embed_odd(self, state, t):
-        h1a = np.zeros(self.context_dim+1)  # h^a_{2t-1}
-        h1b = state[t].reshape(self.num_actions*self.context_dim)  # h^b_{2t-1}
-        h1c = np.zeros(self.num_actions)  # h^c_{2t-1}
-        h1d = np.zeros(1)
-        pos_1 = np.array([2*t-1, (2*t-1)**2, 1])
-        h1 = np.concatenate([h1a, h1b, h1c, h1d, pos_1])
-        return h1
-
-    def embed_even(self, action, reward, t):
-        h2a = action[t]
-        h2a = np.concatenate([h2a, np.array([reward[t]])])  # Add reward to the action embedding
-        h2b = np.zeros(self.num_actions*self.context_dim)
-        h2c = np.zeros(self.num_actions)
-        h2d = np.zeros(1)
-        pos_2 = np.array([2*t, (2*t)**2, 1])
-        h2 = np.concatenate([h2a, h2b, h2c, h2d, pos_2])
-        return h2
-
-    def tokenize(self, traj):
-        states, actions, rewards, action_indexs = traj
-        action_set = states[0]
-        tokens = []
-        for t in range(self.time_step):  # fixed range issue here
-            h1 = self.embed_odd(states, t)
-            h2 = self.embed_even(actions, rewards, t)
-            tokens.extend([h1, h2])
-        # to torch tensor
-        tokens = torch.tensor(tokens, dtype=torch.float32)  
-        # action_set: [num_actions, context_dim]
-        # find the action_index for each action in actions
-        action_labels = torch.tensor(action_indexs, dtype=torch.long)
-
-        return tokens, action_labels
-    
     def __getitem__(self, idx):
-        return self.tokenize(self.traj_data[idx])
+        traj = self.traj_data[idx]
+        states, actions, rewards, action_indices = traj
+        action_set = torch.tensor(states[0], dtype=torch.float32).to(device) # [num_actions, context_dim]
+        action_set = action_set.reshape(-1) # [num_actions*context_dim]
+
+        context_rewards = torch.tensor(rewards, dtype=torch.float32).to(device).unsqueeze(-1)
+        optimal_actions = torch.tensor(action_indices, dtype=torch.long).to(device)
+
+        action_indices_tensor = torch.tensor(action_indices, dtype=torch.long).unsqueeze(-1)
+       
+        # print('action_set_shape', action_set.shape) # [seq_len, num_actions*context_dim]
+        # print('context_rewards_shape', context_rewards.shape) # [seq_len, 1]
+        # print('optimal_actions_shape', optimal_actions.shape) # [seq_len]
+        # print('action_indices_tensor_shape', action_indices_tensor.shape) # [seq_len]
+        context_actions_one_hot = torch.zeros(action_indices_tensor.shape[0], self.act_num) # [seq_len, num_actions]
+        # one-hot encode the context actions of last dimension
+        context_actions_one_hot.scatter_(1, action_indices_tensor, 1) # [seq_len, num_actions]
+
+
+        # print(states.shape, actions.shape, rewards.shape, action_indexs.shape)
+        return {
+            'action_set': action_set,
+            'context_actions': context_actions_one_hot.to(device),
+            'context_rewards': context_rewards,
+            'true_actions': optimal_actions
+        }
+# class TrajectoryDataset:
+#     def __init__(self, traj_data, time_step=200, num_actions=10, context_dim=5):
+#         self.traj_data = traj_data
+#         self.time_step = time_step
+#         self.num_actions = num_actions
+#         self.context_dim = context_dim
+
+#     def __len__(self):
+#         return len(self.traj_data)
+    
+#     @staticmethod
+#     def embed_odd(state, t, context_dim, num_actions):
+#         h1a = np.zeros(context_dim+1) # h^a_{2t-1}
+#         h1b = state.reshape(num_actions*context_dim)  # h^b_{2t-1}
+#         h1c = np.zeros(num_actions)  # h^c_{2t-1}
+#         h1d = np.zeros(1)
+#         pos_1 = np.array([2*t-1, (2*t-1)**2, 1])
+#         h1 = np.concatenate([h1a, h1b, h1c, h1d, pos_1])
+#         return h1
+
+#     @staticmethod
+#     def embed_even(action, reward, t, context_dim, num_actions):
+#         h2a = action
+#         h2a = np.concatenate([h2a, np.array([reward])])  # Add reward to the action embedding
+#         h2b = np.zeros(num_actions*context_dim)
+#         h2c = np.zeros(num_actions)
+#         h2d = np.zeros(1)
+#         pos_2 = np.array([2*t, (2*t)**2, 1])
+#         h2 = np.concatenate([h2a, h2b, h2c, h2d, pos_2])
+#         return h2
+
+#     def tokenize(self, traj):
+#         states, actions, rewards, action_indexs = traj
+#         action_set = states[0]
+#         tokens = []
+#         for t in range(self.time_step):  # fixed range issue here
+#             h1 = TrajectoryDataset.embed_odd(states[t], t+1, self.context_dim, self.num_actions)
+#             h2 = TrajectoryDataset.embed_even(actions[t], rewards[t], t+1, self.context_dim, self.num_actions)
+#             tokens.extend([h1, h2])
+#         # to torch tensor
+#         tokens = torch.tensor(tokens, dtype=torch.float32)  
+#         # action_set: [num_actions, context_dim]
+#         # find the action_index for each action in actions
+#         action_labels = torch.tensor(action_indexs, dtype=torch.long)
+
+#         return tokens, action_labels
+    
+#     def __getitem__(self, idx):
+#         return self.tokenize(self.traj_data[idx])
 
