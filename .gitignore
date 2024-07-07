@@ -1,3 +1,4 @@
 data/*.pkl
+data/*.csv
 model
 wandb
