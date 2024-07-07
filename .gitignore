@@ -2,3 +2,4 @@ data/*.pkl
 data/*.csv
 model
 wandb
+trainer.py
