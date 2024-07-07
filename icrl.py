@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from transformers import GPT2Tokenizer, GPT2LMHeadModel, AdamW
-
+from abc import ABC, abstractmethod
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 ####################
@@ -37,17 +37,40 @@ class Environment:
         # reset w_star and action_set
         self.w_star = np.random.uniform(0, 1, self.context_dim)
         self.action_set = np.random.uniform(-1, 1, (self.num_actions, self.context_dim))
-        
+
+
+class Algo(ABC):
+    def __init__(self, num_actions, context_dim):
+        self.num_actions = num_actions
+        self.context_dim = context_dim
+        # self.lambda_reg = lambda_reg
+        # self.A = np.eye(context_dim) * lambda_reg
+        # self.b = np.zeros((context_dim, 1))
+    
+    @abstractmethod
+    def select_action(self, action_set):
+        raise NotImplementedError("This method should be implemented by subclasses.")
+    
+    def update(self, reward, action):
+        self.A += np.outer(action, action)
+        self.b += reward * action.reshape(-1, 1)
+    
+    def reset(self):
+        self.A = np.eye(self.context_dim) * self.lambda_reg
+        self.b = np.zeros((self.context_dim, 1))
+
+    def estimate_parameters(self):
+        raise NotImplementedError("This method should be implemented by subclasses.")
+
 ####################
 # LinUCB Class
 ####################
 
-class LinUCB:
+class LinUCB(Algo):
     def __init__(self, num_actions, context_dim, alpha=2, lambda_reg=1):
+        super().__init__(num_actions, context_dim)
         self.alpha = alpha  # Set alpha to the fixed value of 2
         self.lambda_reg = lambda_reg
-        self.context_dim = context_dim
-        self.num_actions = num_actions
         self.A = np.eye(context_dim) * lambda_reg  # Initialize A as a diagonal matrix with lambda_reg on the diagonal: X.T @ X + lambda_reg * I
         self.b = np.zeros((context_dim, 1)) # Initialize b as a zero vector, b represents the sum of rewards for each action: X.T @ y
         # self.historical_rewards = np.zeros(1)  # Initialize the historical rewards vector
@@ -91,10 +114,9 @@ class LinUCB:
 ####################
 # Thompson Sampling Class
 ####################
-class ThompsonSampling:
+class ThompsonSampling(Algo):
     def __init__(self, num_actions, context_dim, std_dev=1.5, lambda_param=1):
-        self.num_actions = num_actions
-        self.context_dim = context_dim
+        super().__init__(num_actions, context_dim)
         self.std_dev = std_dev
         self.lambda_param = lambda_param
         self.A = np.eye(context_dim) * lambda_param
@@ -119,6 +141,19 @@ class ThompsonSampling:
         # Reset the A and b matrices
         self.A = np.eye(self.context_dim) * self.lambda_param
         self.b = np.zeros((self.context_dim, 1))
+
+class RandomChoose(Algo):
+    def __init__(self, num_actions, context_dim):
+        super().__init__(num_actions, context_dim)
+    
+    def select_action(self, action_set):
+        return np.random.choice(self.num_actions)
+    
+    def update(self, reward, action):
+        pass
+    
+    def reset(self):
+        pass
 
 
 ####################
@@ -148,7 +183,7 @@ class TrajectoryDataset(Dataset):
 
         context_rewards = torch.tensor(rewards, dtype=torch.float32).to(device).unsqueeze(-1)
         optimal_actions = torch.tensor(action_indices, dtype=torch.long).to(device)
-
+        
         action_indices_tensor = torch.tensor(action_indices, dtype=torch.long).unsqueeze(-1)
        
         # print('action_set_shape', action_set.shape) # [seq_len, num_actions*context_dim]
@@ -162,10 +197,10 @@ class TrajectoryDataset(Dataset):
 
         # print(states.shape, actions.shape, rewards.shape, action_indexs.shape)
         return {
-            'action_set': action_set,
-            'context_actions': context_actions_one_hot.to(device),
-            'context_rewards': context_rewards,
-            'true_actions': optimal_actions
+            'action_set': action_set, # [num_actions*context_dim]
+            'context_actions': context_actions_one_hot.to(device), # [seq_len, num_actions]
+            'context_rewards': context_rewards, # [seq_len, 1]
+            'true_actions': optimal_actions # [seq_len]
         }
 # class TrajectoryDataset:
 #     def __init__(self, traj_data, time_step=200, num_actions=10, context_dim=5):
