@@ -27,6 +27,8 @@ class DecoderTransformerBackbone(nn.Module):
         self.layernorm = layernorm
         self.mlp = mlp
         self.positional_embedding = positional_embedding
+        self.head_dim = self.n_embd // self.n_head
+        assert self.n_embd % self.n_head == 0, "Embedding dimension must be divisible by the number of heads."
 
         # positional embeddings
         self.wpe = nn.Embedding(self.n_positions, self.n_embd) # dimension (n_positions, n_embd)
@@ -78,20 +80,29 @@ class DecoderTransformerBackbone(nn.Module):
             position_embeds = self.wpe(position_ids) # (batch_size, seq_len, embed_dim)
             H = H + position_embeds
         hidden_states.append(H)
+        # print(H.device)
 
         for (q, k, v, mlp, ln1, ln2) in zip(self._queries, self._keys, self._values, self._mlps, self._lns_1, self._lns_2):
             # q, k, v: (batch_size, seq_len, embed_dim)
             # ln1, ln2: (batch_size, seq_len, embed_dim)
             # mlp: (batch_size, seq_len, embed_dim)
             # Apply linear transformations
-            query = q(H)
-            key = k(H)
-            value = v(H)
+            # query = q(H)
+            # key = k(H)
+            # value = v(H)
+            query = q(H).view(-1, N, self.n_head, self.head_dim).transpose(1, 2)
+            key = k(H).view(-1, N, self.n_head, self.head_dim).transpose(1, 2)
+            value = v(H).view(-1, N, self.n_head, self.head_dim).transpose(1, 2)
+            # query, key, value: (batch_size, n_head, seq_len, head_dim)
 
             # Calculate attention scores
-            attn_weight = self.activation(torch.einsum('bid,bjd->bij', query, key)) * self.mask[:, :N, :N].to(H.device)
+            # attn_weight = self.activation(torch.einsum('bid,bjd->bij', query, key)) * self.mask[:, :N, :N].to(H.device)
+            attn_weight = self.activation(torch.einsum('bhid,bhjd->bhij', query, key)/np.sqrt(self.head_dim)) * self.mask[:, :N, :N].to(H.device)
+
             # attn_weight: (batch_size, seq_len, seq_len)
-            H = H + torch.einsum('bij,bjd->bid', attn_weight, value)
+            # H = H + torch.einsum('bij,bjd->bid', attn_weight, value)
+            H = H + torch.einsum('bhij,bhjd->bhid', attn_weight, value).transpose(1, 2).reshape(-1, N, self.n_embd)
+
             if self.layernorm:
                 H = ln1(H)
             if self.mlp:
@@ -178,7 +189,8 @@ class Transformer(nn.Module):
         #     action_seq[:, 1::2, -1] = x['context_rewards'].squeeze(-1) # make the even layers hold the rewards
         #     # print(action_seq.size())
         # else:       
-        #     action_seq[:, 1::2, :] = torch.cat([x['context_actions'],x['context_rewards']],dim=2)  # make the even layers hold the action actions & rewards
+        action_seq[:, 1::2, :] = torch.cat([x['context_actions'],x['context_rewards']],dim=2)  # make the even layers hold the action actions & rewards
+
         one_seq=torch.ones((batch_size,2*current_horizon,1),device=device) # dimension (batch_size, 2*H, 1) h_{c}
         pos_seq=torch.arange(1,2*current_horizon+1,dtype=torch.float32, device=device) # dimension (2*H) 
         pos_seq=pos_seq.reshape(1,-1,1).repeat(batch_size,1,1) # dimension (batch_size, 2*H, 1) h_{d}
@@ -266,7 +278,7 @@ def trainer(model, train_dataloader, test_dataloader, optimizer, num_epochs=10):
 
 # Q_trainer
 # Trainer
-def Q_trainer(model, train_dataloader, test_dataloader, optimizer, num_epochs=10, gamma = 0.99, double=False):
+def Q_trainer(model, train_dataloader, test_dataloader, optimizer, loss_fn, num_epochs=10, gamma = 0.99, double=False):
     # record the loss before training
     train_loss = 0.0
     test_loss = 0.0
