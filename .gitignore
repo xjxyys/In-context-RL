@@ -1,5 +1,6 @@
 data/*.pkl
 data/*.csv
+figs
 model
 wandb
 trainer.py

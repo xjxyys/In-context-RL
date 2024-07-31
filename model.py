@@ -126,13 +126,13 @@ class Transformer(nn.Module):
         self.n_embd = config['n_embd']
         self.n_layer = config['n_layer']
         self.n_head = config['n_head']
-        self.state_dim = self.config['state_dim']
+        # self.state_dim = self.config['state_dim']
         self.action_dim = self.config['action_dim']
         self.dropout = self.config['dropout']
         
         self.act_num= self.config['act_num']
         self.dim= self.config['dim']
-        self.act_type=self.config['act_type']
+        self.act_type=self.config['activation']
         self.pred_q = config['pred_q']
 
         Model_config = GPT2Config(
@@ -156,7 +156,7 @@ class Transformer(nn.Module):
         )
 
         self.pred_actions = nn.Linear(self.n_embd, self.action_dim)
-        self.pred_qvalues = nn.Linear(self.n_embd, self.action_dim) # for predicting q-values
+        # self.pred_qvalues = nn.Linear(self.n_embd, self.action_dim) # for predicting q-values
     
     def forward(self, x):
         # query_states = x['query_states'][:, None, :]
